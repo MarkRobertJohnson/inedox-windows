@@ -82,6 +82,7 @@
     <Compile Include="Configurations\IIS\IisObjectState.cs" />
     <Compile Include="Configurations\IIS\IisSiteConfiguration.cs" />
     <Compile Include="Configurations\IIS\IisVirtualDirectoryConfiguration.cs" />
+    <Compile Include="Configurations\PSDsc\PSDscScriptConfiguration.cs" />
     <Compile Include="Configurations\Registry\InternalExtensions.cs" />
     <Compile Include="Configurations\Registry\RegistryConfiguration.cs" />
     <Compile Include="Configurations\Registry\RegistryKeyConfiguration.cs" />
@@ -94,6 +95,7 @@
     <Compile Include="Namespaces.cs" />
     <Compile Include="Operations\CollectDscModulesOperation.cs" />
     <Compile Include="Operations\DotNet\EnsureAppSettingOperation.cs" />
+    <Compile Include="Operations\EnsurePSDscScriptOperation.cs" />
     <Compile Include="Operations\IIS\Applications\EnsureIisApplicationOperation.cs" />
     <Compile Include="Operations\IIS\AppPools\AppPoolJob.cs" />
     <Compile Include="Operations\IIS\AppPools\AppPoolOperationBase.cs" />
