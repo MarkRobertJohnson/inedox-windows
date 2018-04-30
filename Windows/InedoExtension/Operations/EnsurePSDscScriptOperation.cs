@@ -13,6 +13,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Management.Automation;
 using System.Management.Automation.Language;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,7 +27,6 @@ namespace Inedo.Extensions.Windows.Operations
     [Tag("dsc")]
     [Tag("ensure")]
     [Tag("configuration")]
-    [DefaultProperty(nameof(FilePath))]
     public class EnsurePSDscScriptOperation : EnsureOperation<PSDscScriptConfiguration>
     {
         protected override ExtendedRichDescription GetDescription(IOperationConfiguration config)
@@ -38,23 +38,32 @@ namespace Inedo.Extensions.Windows.Operations
 
         public override async Task ConfigureAsync(IOperationExecutionContext context)
         {
-   
-            this.LogDebug($"Ensuring DSC configuration {FilePath}...");
-        
+            if (!ValidateConfiguration())
+                return;
 
+            var scriptPath = await GetScriptPath();
+            var configDataPath = await GetConfigDataPath(scriptPath, Template.DscConfigDataPath, Template.DscConfigDataAsset);
+
+            this.LogInformation($"Invoking DSC Configuration '{scriptPath}' (Path: {scriptPath}) ...");
+            if (!string.IsNullOrWhiteSpace(configDataPath))
+            {
+                this.LogInformation($"Using DSC Configuration Data from '{configDataPath}'");
+            }
             if (context.Simulation)
             {
-                this.LogInformation("Invoking DscResource...");
+                this.LogInformation($"Running simulation, will not configure ...'");
                 return;
             }
+            this.LogDebug($"Enacting DSC configuration '{scriptPath}' ...");
+        
 
-            FilePath = Template.FilePath;
 
             var jobRunner = await context.Agent.GetServiceAsync<IRemoteJobExecuter>();
 
-            var configNames = await GetDscConfigurationNamesFromScript(context.CancellationToken, jobRunner, FilePath);
+            var configNames = await GetDscConfigurationNamesFromScript(context.CancellationToken, jobRunner, scriptPath);
+            await CompileDscConfigurationsInScript(context.CancellationToken, jobRunner, scriptPath, configNames.ToArray(), configDataPath);
 
-            var dir = System.IO.Path.GetDirectoryName(Template.FilePath);
+            var dir = System.IO.Path.GetDirectoryName(scriptPath);
 
             // Start DSC for each configuration in the script file
             foreach (var config in configNames)
@@ -63,7 +72,8 @@ namespace Inedo.Extensions.Windows.Operations
 
                 var job = new ExecutePowerShellJob
                 {
-                    DebugLogging = true,
+                    DebugLogging = Template.DebugLogging,
+                    VerboseLogging = Template.VerboseLogging,
                     Variables = new Dictionary<string, object>
                 {
                     { "configDir", configDir },
@@ -72,42 +82,91 @@ namespace Inedo.Extensions.Windows.Operations
 Start-DscConfiguration -Path $configDir -Wait -Verbose 
 "
                 };
-                this.LogDebug(job.ScriptText);
+                if (Template.DebugLogging)
+                    this.LogDebug(job.ScriptText);
 
                 job.MessageLogged += (s, e) => this.Log(e.Level, e.Message);
 
                 await jobRunner.ExecuteJobAsync(job, context.CancellationToken);
             }
-            
-
-
         }
 
         public override async Task<PersistedConfiguration> CollectAsync(IOperationCollectionContext context)
         {
-
-            if (this.Template == null)
-                throw new InvalidOperationException("Template is not set.");
-
-            var fullScriptName = this.FilePath;
-            if (this.Template.FilePath == null)
+            if (!ValidateConfiguration())
             {
-                this.LogError("Bad or missing DSC Script file name.");
                 return new PSDscScriptConfiguration();
             }
-            FilePath = this.Template.FilePath;
+            string scriptPath = await GetScriptPath();
+            var configDataPath = await GetConfigDataPath(scriptPath, Template.DscConfigDataPath, Template.DscConfigDataAsset);
+
+            this.LogInformation($"Testing DSC Configuration '{scriptPath}' ...");
+            if(!string.IsNullOrWhiteSpace(configDataPath))
+            {
+                this.LogInformation($"Using DSC Configuration Data from '{configDataPath}'");
+            }
 
             var jobRunner = await context.Agent.GetServiceAsync<IRemoteJobExecuter>();
 
-            var configNames = await GetDscConfigurationNamesFromScript(context.CancellationToken, jobRunner, FilePath);
+            var configNames = await GetDscConfigurationNamesFromScript(context.CancellationToken, jobRunner, scriptPath);
+            await CompileDscConfigurationsInScript(context.CancellationToken, jobRunner, scriptPath, configNames.ToArray(), configDataPath);
+            //PSremoting must be enabled to test DSC configurations
             await EnsurePsRemotingEnabled(context, jobRunner);
-            bool configured = await TestDscConfigurationsInScript(context, jobRunner, FilePath, configNames.ToArray());
+            bool configured = await TestDscConfigurationsInScript(context, jobRunner, scriptPath, configNames.ToArray());
 
-            return await Complete(new PSDscScriptConfiguration {
+            return await Complete(new PSDscScriptConfiguration
+            {
                 Configured = configured,
-                FilePath = this.Template.FilePath,
-                ConfigNames = configNames
+                DscScriptPath = this.Template.DscScriptPath,
+                DscScriptAsset = this.Template.DscScriptAsset,
+                DscConfigDataAsset = this.Template.DscConfigDataAsset,
+                DscConfigDataPath = this.Template.DscConfigDataPath,
+                DebugLogging = this.Template.DebugLogging,
+                VerboseLogging = this.Template.VerboseLogging
             });
+        }
+
+        private async Task<string> GetScriptPath()
+        {
+            var scriptPath = Template.DscScriptPath;
+            //If script asset is specified, then get the asset contents, write to a temp file location
+            if (!string.IsNullOrWhiteSpace(Template.DscScriptAsset))
+            {
+                var assetName = Template.DscScriptAsset.Split(new[] { "::" }, 2, StringSplitOptions.None).Last();
+
+                var scriptContents = await PSUtil.GetScriptTextAsync(this, Template.DscScriptAsset, null);
+
+                var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), assetName, Hash(scriptContents));
+                System.IO.Directory.CreateDirectory(tempDir);
+
+                scriptPath = System.IO.Path.Combine(tempDir, System.IO.Path.GetFileNameWithoutExtension(assetName) + ".ps1");
+
+                
+                System.IO.File.WriteAllText(scriptPath, scriptContents, Encoding.UTF8);
+
+            }
+
+            return scriptPath;
+        }
+
+        private async Task<string> GetConfigDataPath(string scriptPath, string configDataPath, string configDataAsset)
+        {
+            var newConfigDataPath = configDataPath;
+            //If script asset is specified, then get the asset contents, write to a temp file location
+            if (!string.IsNullOrWhiteSpace(configDataAsset))
+            {
+                var assetName = configDataAsset.Split(new[] { "::" }, 2, StringSplitOptions.None).Last();
+
+                var dir = System.IO.Path.GetDirectoryName(scriptPath);
+
+                newConfigDataPath = System.IO.Path.Combine(dir, System.IO.Path.GetFileNameWithoutExtension(assetName) + ".psd1");
+
+                var dataContents = await PSUtil.GetScriptTextAsync(this, configDataAsset, null);
+                System.IO.File.WriteAllText(newConfigDataPath, dataContents, Encoding.UTF8);
+
+            }
+
+            return newConfigDataPath;
         }
 
         private async Task<List<string>> GetDscConfigurationNamesFromScript(CancellationToken cancellationToken, IRemoteJobExecuter jobRunner,
@@ -116,10 +175,9 @@ Start-DscConfiguration -Path $configDir -Wait -Verbose
             var collectJob = new ExecutePowerShellJob
             {
                 CollectOutput = true,
-                //OutVariables = new[] { ExecutePowerShellJob.CollectOutputAsDictionary },
                 OutVariables = new[] { "results" },
-                DebugLogging = true,
-                VerboseLogging = true,
+                DebugLogging = Template.DebugLogging,
+                VerboseLogging = Template.VerboseLogging,
                 Variables = new Dictionary<string, object>
                 {
                     {"scriptPath", scriptPath }
@@ -147,20 +205,15 @@ $configNames = $configDefs | ForEach-Object {
 }
 "
             };
-            //* NOTE: Would be better to do in code
-              
-            var ast = Parser.ParseFile(scriptPath, out var _, out var errors);
-            var configDefinitions = ast.FindAll(x => x is ConfigurationDefinitionAst, true);
-            var configNames = configDefinitions.Select(x => (x as ConfigurationDefinitionAst)?.InstanceName?.Extent.Text);
 
-            this.LogDebug(collectJob.ScriptText);
+            if(Template.DebugLogging)
+                this.LogDebug(collectJob.ScriptText);
             collectJob.MessageLogged += (s, e) => {
                 this.Log(e.Level, e.Message);
                 }
             ;
       
             var result = (ExecutePowerShellJob.Result)await jobRunner.ExecuteJobAsync(collectJob, cancellationToken);
-            //    var collectValues = ((Dictionary<string, object>)result.OutVariables[ExecutePowerShellJob.CollectOutputAsDictionary]).ToDictionary(k => k.Key, k => k.Value?.ToString(), StringComparer.OrdinalIgnoreCase);
             var collectValues = ((List<Object>)result.OutVariables["results"]).Cast<string>();
 
             return collectValues.ToList();
@@ -173,7 +226,8 @@ $configNames = $configDefs | ForEach-Object {
             {
                 CollectOutput = true,
                 OutVariables = new[] { ExecutePowerShellJob.CollectOutputAsDictionary },
-                DebugLogging = true,
+                DebugLogging = Template.DebugLogging,
+                VerboseLogging = Template.VerboseLogging,
                 Variables = null,
                 LogOutput = true,
                 ScriptText = @"
@@ -185,27 +239,35 @@ if($trustedHosts -and $trustedHosts.Value -ne '*') {
 "
             };
 
-            this.LogDebug(collectJob.ScriptText);
+            if (Template.DebugLogging)
+                this.LogDebug(collectJob.ScriptText);
             collectJob.MessageLogged += (s, e) => this.Log(e.Level, e.Message);
 
             var result = (ExecutePowerShellJob.Result)await jobRunner.ExecuteJobAsync(collectJob, context.CancellationToken);
         }
 
-        private async Task<bool> TestDscConfigurationsInScript(IOperationCollectionContext context, IRemoteJobExecuter jobRunner,
-           string scriptPath, string[] configNames)
+        private async Task CompileDscConfigurationsInScript(CancellationToken cancellationToken, IRemoteJobExecuter jobRunner,
+        string scriptPath, string[] configNames, string configDataPath = null)
         {
             var collectJob = new ExecutePowerShellJob
             {
                 CollectOutput = true,
-                OutVariables = new[] { "results" },
-                DebugLogging = true,
+                OutVariables = null,
+                DebugLogging = Template.DebugLogging,
+                VerboseLogging = Template.VerboseLogging,
                 Variables = new Dictionary<string, object>
                 {
                     {"scriptPath", scriptPath },
-                    {"configNames", configNames }
+                    {"configNames", configNames },
+                    {"ConfigurationData", configDataPath }
                 },
                 LogOutput = true,
                 ScriptText = @"
+$configArg = ''
+if($ConfigurationData) {
+    $configArg = ""-ConfigurationData '$ConfigurationData'""
+}
+
 # Source the configuration script so the configurations are available to invoke
 cd ([IO.Path]::GetDirectoryName($scriptPath)) | out-null
 . $scriptPath | out-null
@@ -219,13 +281,53 @@ $configNames | foreach {
     del $_ -Force -Recurse -ErrorAction SilentlyContinue | out-null
 
     #Now compile the configuration into MOFs (Each configuration will get its own directory)
-    Invoke-Expression -Command $_ | out-null
+    Invoke-Expression -Command ""$($_) $configArg"" | out-null
+}
+"
+            };
+
+            if (Template.DebugLogging)
+                this.LogDebug(collectJob.ScriptText);
+            collectJob.MessageLogged += (s, e) => this.Log(e.Level, e.Message);
+
+            await jobRunner.ExecuteJobAsync(collectJob, cancellationToken);
+        }
+
+        /// <summary>
+        /// Expects that each configuration has already been compiled
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="jobRunner"></param>
+        /// <param name="scriptPath"></param>
+        /// <param name="configNames"></param>
+        /// <returns></returns>
+        private async Task<bool> TestDscConfigurationsInScript(IOperationCollectionContext context, IRemoteJobExecuter jobRunner,
+           string scriptPath, string[] configNames)
+        {
+            var collectJob = new ExecutePowerShellJob
+            {
+                CollectOutput = true,
+                OutVariables = new[] { "results" },
+                DebugLogging = Template.DebugLogging,
+                VerboseLogging = Template.VerboseLogging,
+                Variables = new Dictionary<string, object>
+                {
+                    {"scriptPath", scriptPath },
+                    {"configNames", configNames }
+                },
+                LogOutput = true,
+                ScriptText = @"
+# Source the configuration script so the configurations are available to invoke
+cd ([IO.Path]::GetDirectoryName($scriptPath)) | out-null
+
+$configNames | foreach {
     $results += @{$_ = (Test-DscConfiguration -Path $_).InDesiredState}
 }
 "
             };
 
-            this.LogDebug(collectJob.ScriptText);
+            if (Template.DebugLogging)
+                this.LogDebug(collectJob.ScriptText);
             collectJob.MessageLogged += (s, e) => this.Log(e.Level, e.Message);
 
             var result = (ExecutePowerShellJob.Result)await jobRunner.ExecuteJobAsync(collectJob, context.CancellationToken);
@@ -251,10 +353,37 @@ $configNames | foreach {
             return base.Compare(other);
         }
 
-        [Required]
-        [ScriptAlias("Path")]
-        [DisplayName("File path")]
-        [Description("The path to the DSC configuration script to ensure.")]
-        public string FilePath { get; set; }
+        private bool ValidateConfiguration()
+        {
+            bool valid = true;
+            if (this.Template == null)
+                throw new InvalidOperationException("Template is not set.");
+
+            if (string.IsNullOrWhiteSpace(this.Template.DscScriptAsset) && string.IsNullOrWhiteSpace(this.Template.DscScriptPath))
+            {
+                this.LogError("DSC Configuration script missing. Specify a value for either \"DscScript Asset\" or \"DscScriptPath\".");
+                valid = false;
+            }
+
+            return valid;
+        }
+
+
+        static string Hash(string input)
+        {
+            using (SHA1Managed sha1 = new SHA1Managed())
+            {
+                var hash = sha1.ComputeHash(Encoding.UTF8.GetBytes(input));
+                var sb = new StringBuilder(hash.Length * 2);
+
+                foreach (byte b in hash)
+                {
+                    // can be "x2" if you want lowercase
+                    sb.Append(b.ToString("X2"));
+                }
+
+                return sb.ToString();
+            }
+        }
     }
 }

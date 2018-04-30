@@ -80,7 +80,7 @@ namespace Inedo.Extensions.Windows.PowerShell
         }
 
 #if Hedgehog
-        private static async Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
+        internal static async Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
         {
             string scriptName;
             string raftName;
@@ -122,7 +122,7 @@ namespace Inedo.Extensions.Windows.PowerShell
             }
         }
 #elif BuildMaster
-        private static Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
+        internal static Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
         {
             string scriptName;
             int? applicationId;
