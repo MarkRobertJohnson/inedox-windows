@@ -82,6 +82,7 @@
     <Compile Include="Configurations\IIS\IisObjectState.cs" />
     <Compile Include="Configurations\IIS\IisSiteConfiguration.cs" />
     <Compile Include="Configurations\IIS\IisVirtualDirectoryConfiguration.cs" />
+    <Compile Include="Configurations\PSDsc\DictionaryConfiguration2.cs" />
     <Compile Include="Configurations\PSDsc\PSDscScriptConfiguration.cs" />
     <Compile Include="Configurations\Registry\InternalExtensions.cs" />
     <Compile Include="Configurations\Registry\RegistryConfiguration.cs" />
@@ -147,7 +148,11 @@
   <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
-    <PostBuildEvent>powershell -Command "if (Test-Path C:\Projects\Hedgehog\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Force; Move-Item C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Destination C:\Projects\Hedgehog\Extensions\$(TargetName).inedox -Force }"
-powershell -Command "if (Test-Path C:\Projects\Otter\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\Projects\Otter\Extensions\$(TargetName).zip -Force; Move-Item C:\Projects\Otter\Extensions\$(TargetName).zip -Destination C:\Projects\Otter\Extensions\$(TargetName).inedox -Force }"</PostBuildEvent>
+    <PostBuildEvent>
+      powershell -Command "if (Test-Path C:\Projects\Hedgehog\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Force; Move-Item C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Destination C:\Projects\Hedgehog\Extensions\$(TargetName).inedox -Force }"
+      powershell -Command "Stop-Service -Name INEDOOTTERWEBSVC; Stop-Service -Name INEDOOTTERSVC"
+      powershell -Command "if (Test-Path C:\ProgramData\Otter\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\ProgramData\Otter\Extensions\$(TargetName).zip -Force; Move-Item C:\ProgramData\Otter\Extensions\$(TargetName).zip -Destination C:\ProgramData\Otter\Extensions\$(TargetName).inedox -Force }"
+      powershell -Command Start-Service -Name INEDOOTTERWEBSVC; Start-Service -Name INEDOOTTERSVC"
+    </PostBuildEvent>
   </PropertyGroup>
 </Project>

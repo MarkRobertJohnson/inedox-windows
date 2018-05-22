@@ -13,6 +13,7 @@ using Inedo.ExecutionEngine.Mapping;
 using Inedo.Extensibility;
 using Inedo.Extensibility.Configurations;
 using Inedo.Extensibility.Operations;
+using Inedo.Extensions.Windows.Configurations.PSDsc;
 using Inedo.Extensions.Windows.PowerShell;
 using Inedo.Serialization;
 
@@ -46,7 +47,7 @@ PSDsc cHdarsResource::cHdars (
   PortsToListen: ""`@(3322,4431,1123)"",
   Enabled: true
 );")]
-    public sealed class PSDscOperation : EnsureOperation<DictionaryConfiguration>, ICustomArgumentMapper
+    public sealed class PSDscOperation : EnsureOperation<DictionaryConfiguration2>, ICustomArgumentMapper
     {
         private const string ConfigurationKeyPropertyName = "Otter_ConfigurationKey";
 
@@ -61,23 +62,27 @@ PSDsc cHdarsResource::cHdars (
         public override PersistedConfiguration GetConfigurationTemplate()
         {
             var desiredValues = new Dictionary<string, string>();
+
             foreach (var arg in this.NamedArguments)
                 desiredValues[arg.Key] = arg.Value.AsString() ?? string.Empty;
 
             desiredValues.Remove(ConfigurationKeyPropertyName);
 
-            return new DictionaryConfiguration(desiredValues);
+            var config =  new DictionaryConfiguration2(desiredValues);
+            config.SetConfigKey(ExtractConfigurationKeyName(config));
+            return config;
         }
 
-        public new DictionaryConfiguration Template => (DictionaryConfiguration)this.GetConfigurationTemplate();
-
+        public new DictionaryConfiguration2 Template => (DictionaryConfiguration2)this.GetConfigurationTemplate();
+        
+       
         public override async Task<PersistedConfiguration> CollectAsync(IOperationCollectionContext context)
         {
             var fullScriptName = this.DefaultArgument.AsString();
             if (fullScriptName == null)
             {
                 this.LogError("Bad or missing DSC Resource name.");
-                return new DictionaryConfiguration();
+                return new DictionaryConfiguration2();
             }
 
             var jobRunner = await context.Agent.GetServiceAsync<IRemoteJobExecuter>();
@@ -90,7 +95,7 @@ PSDsc cHdarsResource::cHdars (
                 Variables = new Dictionary<string, object>
                 {
                     { "Name", this.ResourceName.Name },
-                    { "$Property", GetHashTable(this.Template.Items) },
+                    { "Property", GetHashTable(this.Template.Items) },
                     { "ModuleName", this.ResourceName.Namespace ?? "PSDesiredStateConfiguration" }
                 },
                 ScriptText = "Invoke-DscResource -Name $Name -Method Get -Property $Property -ModuleName $ModuleName"
@@ -108,7 +113,7 @@ PSDsc cHdarsResource::cHdars (
                 Variables = new Dictionary<string, object>
                 {
                     { "Name", this.ResourceName.Name },
-                    { "$Property", GetHashTable(this.Template.Items) },
+                    { "Property", GetHashTable(this.Template.Items) },
                     { "ModuleName", this.ResourceName.Namespace ?? "PSDesiredStateConfiguration" }
                 },
                 ScriptText = "Invoke-DscResource -Name $Name -Method Test -Property $Property -ModuleName $ModuleName"
@@ -122,19 +127,21 @@ PSDsc cHdarsResource::cHdars (
             if (output.Count == 0)
             {
                 this.LogError("Invoke-DscResource did not return any values.");
-                return new DictionaryConfiguration();
+                return new DictionaryConfiguration2();
             }
 
             bool? inDesiredState = output.Select(TryParseBool).LastOrDefault(o => o != null);
             if (inDesiredState == null)
             {
                 this.LogError("Invoke-DscResource did not return a boolean value.");
-                return new DictionaryConfiguration();
+                return new DictionaryConfiguration2();
             }
 
             this.inDesiredState = (bool)inDesiredState;
 
-            return new DictionaryConfiguration(collectValues);
+            var config = new DictionaryConfiguration2(collectValues);
+            config.SetConfigKey(ExtractConfigurationKeyName(config));
+            return config;
         }
 
         private static bool? TryParseBool(string s)
@@ -163,7 +170,7 @@ PSDsc cHdarsResource::cHdars (
             if (context == null)
                 throw new ArgumentNullException(nameof(context));
 
-            var config = (DictionaryConfiguration)actual;
+            var config = (DictionaryConfiguration2)actual;
 
             string keyName = this.ExtractConfigurationKeyName(config);
             string ensurePropertyValue = config.Items.FirstOrDefault(i => string.Equals(i.Key, "Ensure", StringComparison.OrdinalIgnoreCase))?.Value;
@@ -185,7 +192,7 @@ PSDsc cHdarsResource::cHdars (
             );
         }
 
-        public string ExtractConfigurationKeyName(DictionaryConfiguration config)
+        public string ExtractConfigurationKeyName(DictionaryConfiguration2 config)
         {
             string keyName = config.Items.FirstOrDefault(i => string.Equals(i.Key, "Name", StringComparison.OrdinalIgnoreCase))?.Value;
 
@@ -221,9 +228,9 @@ PSDsc cHdarsResource::cHdars (
                 DebugLogging = true,
                 Variables = new Dictionary<string, object>
                 {
-                    { "$Name", this.ResourceName.Name },
-                    { "$Property", GetHashTable(this.Template.Items) },
-                    { "$ModuleName", this.ResourceName.Namespace ?? "PSDesiredStateConfiguration" }
+                    { "Name", this.ResourceName.Name },
+                    { "Property", GetHashTable(this.Template.Items) },
+                    { "ModuleName", this.ResourceName.Namespace ?? "PSDesiredStateConfiguration" }
                 },
                 ScriptText = "Invoke-DscResource -Name $Name -Method Set -Property $Property -ModuleName $ModuleName"
             };
