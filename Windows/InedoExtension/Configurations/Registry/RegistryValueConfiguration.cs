@@ -27,5 +27,8 @@ namespace Inedo.Extensions.Windows.Configurations.Registry
         [DisplayName("Value kind")]
         [DefaultValue(RegistryValueKind.String)]
         public RegistryValueKind ValueKind { get; set; } = RegistryValueKind.String;
+
+        [Persistent]
+        public override bool Exists { get; set; }
     }
 }

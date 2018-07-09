@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Linq;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
@@ -16,8 +15,9 @@ namespace Inedo.Extensions.Windows.PowerShell
 {
     internal class PowerShellScriptRunner : ILogger, IDisposable
     {
-        private InedoPSHost pshost = new InedoPSHost();
-        private Lazy<Runspace> runspaceFactory;
+        private static readonly LazyRegex VariableRegex = new LazyRegex(@"(?>\$(?<1>[a-zA-Z0-9_]+)|\${(?<2>[^}]+)})", RegexOptions.Compiled | RegexOptions.ExplicitCapture);
+        private readonly InedoPSHost pshost = new InedoPSHost();
+        private readonly Lazy<Runspace> runspaceFactory;
         private bool disposed;
 
         public PowerShellScriptRunner()
@@ -34,59 +34,63 @@ namespace Inedo.Extensions.Windows.PowerShell
         public bool DebugLogging { get; set; }
         public bool VerboseLogging { get; set; }
 
-        private Runspace InitializeRunspace()
-        {
-            var runspace = RunspaceFactory.CreateRunspace(this.pshost);
-            runspace.Open();
-            return runspace;
-        }
-
-        public static Dictionary<string, object> ExtractVariables(string script, IOperationExecutionContext context)
+        public static Dictionary<string, RuntimeValue> ExtractVariables(string script, IOperationExecutionContext context)
         {
             var vars = ExtractVariablesInternal(script);
-            var results = new Dictionary<string, object>();
+            var results = new Dictionary<string, RuntimeValue>(StringComparer.OrdinalIgnoreCase);
             foreach (var var in vars)
             {
                 if (RuntimeVariableName.IsLegalVariableName(var))
                 {
                     var varName = new RuntimeVariableName(var, RuntimeValueType.Scalar);
                     var varValue = context.TryGetVariableValue(varName) ?? TryGetFunctionValue(varName, context);
-                    if (varValue != null)
-                    {
-                        var s = varValue.Value.AsString();
-                        if (s.StartsWith(Functions.PsCredentialVariableFunction.Prefix))
-                            results[var] = Functions.PsCredentialVariableFunction.Deserialize(s.Substring(Functions.PsCredentialVariableFunction.Prefix.Length));
-                        else
-                            results[var] = s;
-                    }
+                    if (varValue.HasValue)
+                        results[var] = varValue.Value;
                 }
             }
 
             return results;
         }
-
-        private static RuntimeValue? TryGetFunctionValue(RuntimeVariableName functionName, IOperationExecutionContext context)
+        public static object ConvertToPSValue(RuntimeValue value)
         {
-            try
+            if (value.ValueType == RuntimeValueType.Scalar)
             {
-                return context.TryGetFunctionValue(functionName.ToString());
+                var s = value.AsString() ?? string.Empty;
+                if (s.StartsWith(Functions.PsCredentialVariableFunction.Prefix))
+                    return Functions.PsCredentialVariableFunction.Deserialize(s.Substring(Functions.PsCredentialVariableFunction.Prefix.Length));
+
+                if (string.Equals(s, "true", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                if (string.Equals(s, "false", StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                return s;
             }
-            catch
+            else if (value.ValueType == RuntimeValueType.Vector)
+            {
+                return value.AsEnumerable().Select(v => v.ToString() ?? string.Empty).ToArray();
+            }
+            else if (value.ValueType == RuntimeValueType.Map)
+            {
+                var hashTable = new Hashtable();
+                foreach (var pair in value.AsDictionary())
+                    hashTable[pair.Key] = ConvertToPSValue(pair.Value);
+
+                return hashTable;
+            }
+            else
             {
                 return null;
             }
         }
 
-        public Task<int?> RunAsync(string script, CancellationToken cancellationToken)
+        public async Task<int?> RunAsync(string script, Dictionary<string, RuntimeValue> variables = null, Dictionary<string, RuntimeValue> parameters = null, Dictionary<string, RuntimeValue> outVariables = null, CancellationToken cancellationToken = default)
         {
-            return this.RunAsync(script, new Dictionary<string, object>(), new Dictionary<string, object>(), cancellationToken);
-        }
-        public Task<int?> RunAsync(string script, Dictionary<string, object> variables, Dictionary<string, object> outVariables, CancellationToken cancellationToken)
-        {
-            return this.RunAsync(script, new Dictionary<string, object>(), new Dictionary<string, object>(), new Dictionary<string, object>(), cancellationToken);
-        }
-        public async Task<int?> RunAsync(string script, Dictionary<string, object> variables, Dictionary<string, object> parameters, Dictionary<string, object> outVariables, CancellationToken cancellationToken)
-        {
+            variables = variables ?? new Dictionary<string, RuntimeValue>();
+            parameters = parameters ?? new Dictionary<string, RuntimeValue>();
+            outVariables = outVariables ?? new Dictionary<string, RuntimeValue>();
+
             var runspace = this.Runspace;
 
             var powerShell = System.Management.Automation.PowerShell.Create();
@@ -95,7 +99,7 @@ namespace Inedo.Extensions.Windows.PowerShell
             foreach (var var in variables)
             {
                 this.LogDebug($"Importing {var.Key}...");
-                runspace.SessionStateProxy.SetVariable(var.Key, var.Value);
+                runspace.SessionStateProxy.SetVariable(var.Key, ConvertToPSValue(var.Value));
             }
 
             if (this.DebugLogging)
@@ -120,11 +124,10 @@ namespace Inedo.Extensions.Windows.PowerShell
             foreach (var p in parameters)
             {
                 this.LogDebug($"Assigning parameter {p.Key}...");
-                powerShell.AddParameter(p.Key, p.Value);
+                powerShell.AddParameter(p.Key, ConvertToPSValue(p.Value));
             }
 
             int? exitCode = null;
-            EventHandler<ShouldExitEventArgs> handleShouldExit = (s, e) => exitCode = e.ExitCode;
             this.pshost.ShouldExit += handleShouldExit;
             using (var registration = cancellationToken.Register(powerShell.Stop))
             {
@@ -133,8 +136,7 @@ namespace Inedo.Extensions.Windows.PowerShell
                     await Task.Factory.FromAsync(powerShell.BeginInvoke((PSDataCollection<PSObject>)null, output), powerShell.EndInvoke);
 
                     foreach (var var in outVariables.Keys.ToList())
-                        if (var != ExecutePowerShellJob.CollectOutputAsDictionary)
-                            outVariables[var] = UnwrapReference(powerShell.Runspace.SessionStateProxy.GetVariable(var));
+                        outVariables[var] = PSUtil.ToRuntimeValue(unwrapReference(powerShell.Runspace.SessionStateProxy.GetVariable(var)));
                 }
                 finally
                 {
@@ -142,18 +144,13 @@ namespace Inedo.Extensions.Windows.PowerShell
                 }
             }
 
+            void handleShouldExit(object s, ShouldExitEventArgs e) => exitCode = e.ExitCode;
+
+            object unwrapReference(object value) => value is PSReference reference ? reference.Value : value;
+
             return exitCode;
         }
-
-        private object UnwrapReference(object value)
-        {
-            if (value is PSReference reference)
-            {
-                return reference.Value;
-            }
-            return value;
-        }
-
+        public void Log(MessageLevel logLevel, string message) => this.MessageLogged?.Invoke(this, new LogMessageEventArgs(logLevel, message));
         public void Dispose()
         {
             if (!this.disposed && this.runspaceFactory.IsValueCreated)
@@ -164,14 +161,27 @@ namespace Inedo.Extensions.Windows.PowerShell
             }
         }
 
-        public void Log(MessageLevel logLevel, string message) => this.MessageLogged?.Invoke(this, new LogMessageEventArgs(logLevel, message));
+        private Runspace InitializeRunspace()
+        {
+            var runspace = RunspaceFactory.CreateRunspace(this.pshost);
+            runspace.Open();
+            return runspace;
+        }
 
+        private static RuntimeValue? TryGetFunctionValue(RuntimeVariableName functionName, IOperationExecutionContext context)
+        {
+            try
+            {
+                return context.TryGetFunctionValue(functionName.ToString());
+            }
+            catch
+            {
+                return null;
+            }
+        }
         private static IEnumerable<string> ExtractVariablesInternal(string script)
         {
-            var variableRegex = new Regex(@"(?>\$(?<1>[a-zA-Z0-9_]+)|\${(?<2>[^}]+)})", RegexOptions.ExplicitCapture);
-
-            Collection<PSParseError> errors;
-            var tokens = PSParser.Tokenize(script, out errors);
+            var tokens = PSParser.Tokenize(script, out var errors);
             if (tokens == null)
                 return Enumerable.Empty<string>();
 
@@ -186,7 +196,7 @@ namespace Inedo.Extensions.Windows.PowerShell
 
             foreach (var s in strings)
             {
-                var matches = variableRegex.Matches(s);
+                var matches = VariableRegex.Matches(s);
                 if (matches.Count > 0)
                 {
                     foreach (Match match in matches)
@@ -200,42 +210,6 @@ namespace Inedo.Extensions.Windows.PowerShell
             }
 
             return vars;
-        }
-
-        public static Dictionary<string, object> ConvertToPSArgs(IReadOnlyDictionary<string, RuntimeValue> args)
-        {
-            var result = new Dictionary<string, object>(args.Count);
-            foreach (var pair in args)
-                result[pair.Key] = ConvertToPSValue(pair.Value);
-
-            return result;
-        }
-        public static object ConvertToPSValue(RuntimeValue value)
-        {
-            if (value.ValueType == RuntimeValueType.Scalar)
-            {
-                var s = value.AsString() ?? string.Empty;
-                if (s.StartsWith(Functions.PsCredentialVariableFunction.Prefix))
-                    return Functions.PsCredentialVariableFunction.Deserialize(s.Substring(Functions.PsCredentialVariableFunction.Prefix.Length));
-
-                return s;
-            }
-            else if (value.ValueType == RuntimeValueType.Vector)
-            {
-                return value.AsEnumerable().Select(v => v.ToString() ?? string.Empty).ToArray();
-            }
-            else if (value.ValueType == RuntimeValueType.Map)
-            {
-                var hashTable = new Hashtable();
-                foreach (var pair in value.AsDictionary())
-                    hashTable[pair.Key] = ConvertToPSValue(pair.Value);
-
-                return hashTable;
-            }
-            else
-            {
-                return null;
-            }
         }
 
         private void OnOutputReceived(PSObject obj) => this.OutputReceived?.Invoke(this, new PowerShellOutputEventArgs(obj));
