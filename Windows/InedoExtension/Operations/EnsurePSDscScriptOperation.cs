@@ -234,7 +234,7 @@ $configNames = $configDefs | ForEach-Object {
 Enable-PSRemoting -Force -SkipNetworkProfileCheck -Confirm:$false
 $trustedHosts = get-item WSMan:\localhost\Client\TrustedHosts -ErrorAction SilentlyContinue
 if($trustedHosts -and $trustedHosts.Value -ne '*') {
-    set - item wsman:\localhost\Client\TrustedHosts -value '<local>' -Concatenate
+    set-item wsman:\localhost\Client\TrustedHosts -value '<local>' -Concatenate -Force
 }
 "
             };
