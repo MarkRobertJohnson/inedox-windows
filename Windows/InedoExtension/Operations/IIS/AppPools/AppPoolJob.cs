@@ -11,8 +11,9 @@ namespace Inedo.Extensions.Windows.Operations.IIS.AppPools
     {
         public AppPoolOperationType OperationType { get; set; }
         public string AppPoolName { get; set; }
+        public bool WaitForTargetStatus { get; set; }
 
-        public override Task<object> ExecuteAsync(CancellationToken cancellationToken)
+        public override async Task<object> ExecuteAsync(CancellationToken cancellationToken)
         {
             using (var server = new ServerManager())
             {
@@ -21,27 +22,27 @@ namespace Inedo.Extensions.Windows.Operations.IIS.AppPools
                 {
                     this.Log(
                         this.OperationType == AppPoolOperationType.Stop ? MessageLevel.Warning : MessageLevel.Error,
-                        $"Application pool {this.AppPoolName} does not exist."
+                        $"App pool {this.AppPoolName} does not exist."
                     );
 
-                    return Task.FromResult<object>(null);
+                    return null;
                 }
 
                 switch (this.OperationType)
                 {
                     case AppPoolOperationType.Start:
-                        this.StartAppPool(pool);
+                        await this.StartAppPoolAsync(pool, cancellationToken);
                         break;
                     case AppPoolOperationType.Stop:
-                        this.StopAppPool(pool);
+                        await this.StopAppPoolAsync(pool, cancellationToken);
                         break;
                     case AppPoolOperationType.Recycle:
-                        this.RecycleAppPool(pool);
+                        await this.RecycleAppPoolAsync(pool, cancellationToken);
                         break;
                 }
             }
 
-            return Task.FromResult<object>(null);
+            return null;
         }
 
         public override void Serialize(Stream stream)
@@ -49,12 +50,14 @@ namespace Inedo.Extensions.Windows.Operations.IIS.AppPools
             var writer = new BinaryWriter(stream, InedoLib.UTF8Encoding);
             writer.Write((byte)this.OperationType);
             writer.Write(this.AppPoolName ?? string.Empty);
+            writer.Write(this.WaitForTargetStatus);
         }
         public override void Deserialize(Stream stream)
         {
             var reader = new BinaryReader(stream, InedoLib.UTF8Encoding);
             this.OperationType = (AppPoolOperationType)reader.ReadByte();
             this.AppPoolName = reader.ReadString();
+            this.WaitForTargetStatus = reader.ReadBoolean();
         }
 
         public override void SerializeResponse(Stream stream, object result)
@@ -65,47 +68,82 @@ namespace Inedo.Extensions.Windows.Operations.IIS.AppPools
             return null;
         }
 
-        private void StartAppPool(ApplicationPool pool)
+        private async Task StartAppPoolAsync(ApplicationPool pool, CancellationToken cancellationToken)
         {
             var state = pool.State;
             if (state == ObjectState.Stopped)
             {
-                this.LogInformation($"Starting application pool {pool.Name}...");
+                this.LogInformation($"Starting app pool {pool.Name}...");
                 var result = pool.Start();
-                this.LogInformation($"Application pool {pool.Name} state is now {result}.");
+                this.LogInformation($"App pool {pool.Name} state is now {result}.");
+
+                if (this.WaitForTargetStatus)
+                {
+                    while ((state = pool.State) != ObjectState.Started && state != ObjectState.Stopped)
+                    {
+                        await Task.Delay(100, cancellationToken);
+                    }
+
+                    if (state == ObjectState.Started)
+                        this.LogInformation("App pool is started.");
+                    else
+                        this.LogError("App pool could not be started.");
+                }
             }
             else if (state == ObjectState.Started)
             {
-                this.LogInformation($"Application pool {pool.Name} is already Started.");
+                this.LogInformation($"App pool {pool.Name} is already Started.");
             }
             else
             {
-                this.LogError($"Cannot start application pool {pool.Name}; current state is {state} (must be Stopped).");
+                this.LogError($"Cannot start app pool {pool.Name}; current state is {state} (must be Stopped).");
             }
         }
-        private void StopAppPool(ApplicationPool pool)
+        private async Task StopAppPoolAsync(ApplicationPool pool, CancellationToken cancellationToken)
         {
             var state = pool.State;
             if (state == ObjectState.Started)
             {
-                this.LogInformation($"Stopping application pool {pool.Name}...");
+                this.LogInformation($"Stopping app pool {pool.Name}...");
                 var result = pool.Stop();
-                this.LogInformation($"Application pool {pool.Name} state is now {result}.");
+                this.LogInformation($"App pool {pool.Name} state is now {result}.");
+
+                if (this.WaitForTargetStatus)
+                {
+                    while ((state = pool.State) != ObjectState.Stopped)
+                    {
+                        await Task.Delay(100, cancellationToken);
+                    }
+
+                    this.LogInformation("App pool is stopped.");
+                }
             }
             else if (state == ObjectState.Stopped)
             {
-                this.LogInformation($"Application pool {pool.Name} is already Stopped.");
+                this.LogInformation($"App pool {pool.Name} is already Stopped.");
             }
             else
             {
-                this.LogError($"Cannot stop application pool {pool.Name}; current state is {state} (must be Started).");
+                this.LogError($"Cannot stop app pool {pool.Name}; current state is {state} (must be Started).");
             }
         }
-        private void RecycleAppPool(ApplicationPool pool)
+        private async Task RecycleAppPoolAsync(ApplicationPool pool, CancellationToken cancellationToken)
         {
-            this.LogInformation($"Recycling application pool {pool.Name}...");
+            this.LogInformation($"Recycling app pool {pool.Name}...");
             var result = pool.Recycle();
-            this.LogInformation($"Application pool {pool.Name} state is now {result}.");
+            this.LogInformation($"App pool {pool.Name} state is now {result}.");
+
+            if (this.WaitForTargetStatus)
+            {
+                await Task.Delay(100, cancellationToken);
+
+                while (pool.State != ObjectState.Started)
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
+
+                this.LogInformation("App pool is started.");
+            }
         }
     }
 

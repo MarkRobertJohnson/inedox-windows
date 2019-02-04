@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Management.Automation;
 using System.Threading.Tasks;
 using Inedo.Agents;
 using Inedo.Diagnostics;
@@ -17,17 +19,17 @@ namespace Inedo.Extensions.Windows.PowerShell
         {
             var scriptText = await GetScriptTextAsync(logger, fullScriptName, context);
 
-            var variables = new Dictionary<string, object>();
-            var parameters = new Dictionary<string, object>();
+            var variables = new Dictionary<string, RuntimeValue>();
+            var parameters = new Dictionary<string, RuntimeValue>();
 
             if (PowerShellScriptInfo.TryParse(new StringReader(scriptText), out var scriptInfo))
             {
                 foreach (var var in arguments)
                 {
-                    var value = PowerShellScriptRunner.ConvertToPSValue(var.Value);
+                    var value = var.Value;
                     var param = scriptInfo.Parameters.FirstOrDefault(p => string.Equals(p.Name, var.Key, StringComparison.OrdinalIgnoreCase));
                     if (param != null && param.IsBooleanOrSwitch)
-                        value = Convert.ToBoolean(value);
+                        value = value.AsBoolean() ?? false;
                     if (param != null)
                         parameters[param.Name] = value;
                     else
@@ -36,7 +38,7 @@ namespace Inedo.Extensions.Windows.PowerShell
             }
             else
             {
-                variables = PowerShellScriptRunner.ConvertToPSArgs(arguments);
+                variables = arguments.ToDictionary(a => a.Key, a => a.Value);
             }
 
             var jobRunner = context.Agent.GetService<IRemoteJobExecuter>();
@@ -62,24 +64,49 @@ namespace Inedo.Extensions.Windows.PowerShell
                 logger.LogDebug("Script exit code: " + result.ExitCode);
 
             foreach (var var in result.OutVariables)
-                outArguments[var.Key] = ToRuntimeValue(var.Value);
+                outArguments[var.Key] = var.Value;
 
             return result;
         }
 
-        private static RuntimeValue ToRuntimeValue(object value)
+        public static RuntimeValue ToRuntimeValue(object value)
         {
-            if (value is System.Collections.IDictionary dict)
+            if (value is PSObject psObject)
+            {
+                if (psObject.BaseObject is IDictionary dictionary)
+                    return new RuntimeValue(dictionary.Keys.Cast<object>().ToDictionary(k => k?.ToString(), k => ToRuntimeValue(dictionary[k])));
+
+                if (psObject.BaseObject is IConvertible)
+                    return new RuntimeValue(psObject.BaseObject.ToString());
+
+                var d = new Dictionary<string, RuntimeValue>(StringComparer.OrdinalIgnoreCase);
+                foreach (var p in psObject.Properties)
+                {
+                    if (p.IsGettable && p.IsInstance)
+                        d[p.Name] = ToRuntimeValue(p.Value);
+                }
+
+                return new RuntimeValue(d);
+            }
+
+            if (value is IDictionary dict)
                 return new RuntimeValue(dict.Keys.Cast<object>().ToDictionary(k => k?.ToString(), k => ToRuntimeValue(dict[k])));
-            if (value is string)
+
+            if (value is IConvertible)
                 return new RuntimeValue(value?.ToString());
-            if (value is System.Collections.IEnumerable list)
-                return new RuntimeValue(list.Cast<object>().Select(ToRuntimeValue));
+
+            if (value is IEnumerable e)
+            {
+                var list = new List<RuntimeValue>();
+                foreach (var item in e)
+                    list.Add(ToRuntimeValue(item));
+
+                return new RuntimeValue(list);
+            }
 
             return new RuntimeValue(value?.ToString());
         }
 
-#if Hedgehog
         internal static async Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
         {
             string scriptName;
@@ -121,52 +148,5 @@ namespace Inedo.Extensions.Windows.PowerShell
                 }
             }
         }
-#elif BuildMaster
-        internal static Task<string> GetScriptTextAsync(ILogSink logger, string fullScriptName, IOperationExecutionContext context)
-        {
-            string scriptName;
-            int? applicationId;
-            var scriptNameParts = fullScriptName.Split(new[] { "::" }, 2, StringSplitOptions.None);
-            if (scriptNameParts.Length == 2)
-            {
-                if (string.Equals(scriptNameParts[0], "GLOBAL", StringComparison.OrdinalIgnoreCase))
-                {
-                    applicationId = null;
-                }
-                else
-                {
-                    applicationId = Inedo.BuildMaster.Data.DB.Applications_GetApplications(null, true).FirstOrDefault(a => string.Equals(a.Application_Name, scriptNameParts[0], StringComparison.OrdinalIgnoreCase))?.Application_Id;
-                    if (applicationId == null)
-                    {
-                        logger.LogError($"Invalid application name {scriptNameParts[0]}.");
-                        return Task.FromResult<string>(null);
-                    }
-                }
-
-                scriptName = scriptNameParts[1];
-            }
-            else
-            {
-                applicationId = (context as BuildMaster.Extensibility.IGenericBuildMasterContext)?.ApplicationId;
-                scriptName = scriptNameParts[0];
-            }
-
-            if (!scriptName.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase))
-                scriptName += ".ps1";
-
-            var script = Inedo.BuildMaster.Data.DB.ScriptAssets_GetScriptByName(scriptName, applicationId);
-            if (script == null)
-            {
-                logger.LogError($"Script {scriptName} not found.");
-                return Task.FromResult<string>(null);
-            }
-
-            using (var stream = new MemoryStream(script.Script_Text, false))
-            using (var reader = new StreamReader(stream, InedoLib.UTF8Encoding))
-            {
-                return Task.FromResult(reader.ReadToEnd());
-            }
-        }
-#endif
     }
 }

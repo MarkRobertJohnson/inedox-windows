@@ -26,9 +26,11 @@ IIS::Start-Site BuildMaster;
 
         [Required]
         [ScriptAlias("Name")]
-        [DisplayName("Site name")]
+        [DisplayName("Site")]
         [Description("The name of the IIS site to operate on.")]
         public string SiteName { get; set; }
+
+        public abstract bool WaitForTargetStatus { get; set; }
 
         internal abstract SiteOperationType OperationType { get; }
 
@@ -40,11 +42,11 @@ IIS::Start-Site BuildMaster;
                 {
                     case SiteOperationType.Start:
                         this.LogInformation($"Starting site {this.SiteName}...");
-                        this.LogInformation($"Site {this.SiteName} state is now Started.");
+                        this.LogInformation($"Site {this.SiteName} state is now started.");
                         break;
                     case SiteOperationType.Stop:
                         this.LogInformation($"Stopping site {this.SiteName}...");
-                        this.LogInformation($"Site {this.SiteName} state is now Stopped.");
+                        this.LogInformation($"Site {this.SiteName} state is now stopped.");
                         break;
                 }
             }
@@ -53,12 +55,13 @@ IIS::Start-Site BuildMaster;
                 var job = new SiteJob
                 {
                     SiteName = this.SiteName,
-                    OperationType = this.OperationType
+                    OperationType = this.OperationType,
+                    WaitForTargetStatus = this.WaitForTargetStatus
                 };
 
                 job.MessageLogged += (s, e) => this.Log(e.Level, e.Message);
 
-                var jobExecuter = context.Agent.GetService<IRemoteJobExecuter>();
+                var jobExecuter = await context.Agent.GetServiceAsync<IRemoteJobExecuter>();
                 await jobExecuter.ExecuteJobAsync(job, context.CancellationToken);
             }
         }

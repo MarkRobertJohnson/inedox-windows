@@ -2,12 +2,14 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
-using System.Management.Automation.Language;
-using System.Management.Automation.Runspaces;
+using Inedo.Documentation;
 using Inedo.ExecutionEngine;
+using Inedo.ExecutionEngine.Variables;
+using Inedo.Extensibility;
 using Inedo.Extensibility.Configurations;
-using Inedo.Extensions.Windows.PowerShell;
+using Inedo.Extensibility.Operations;
 using Inedo.Serialization;
+using Inedo.Web;
 
 namespace Inedo.Extensions.Windows.Configurations.DSC
 {
@@ -16,69 +18,90 @@ namespace Inedo.Extensions.Windows.Configurations.DSC
     [Description("A configuration that stores state collected by PowerShell DSC.")]
     public sealed class DscConfiguration : PersistedConfiguration
     {
-        /// <summary>
-        /// Key name used to manually specify the Otter Configuration Key.
-        /// </summary>
-        public const string ConfigurationKeyPropertyName = "Otter_ConfigurationKey";
+        private Dictionary<string, RuntimeValue> dictionary;
 
-        private Dictionary<string, string> dictionary;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="DscConfiguration"/> class.
-        /// </summary>
         public DscConfiguration()
         {
         }
-        /// <summary>
-        /// Initializes a new instance of the <see cref="DscConfiguration"/> class.
-        /// </summary>
-        /// <param name="dictionary">Dictionary to copy.</param>
-        /// <param name="template">Template containing configuration key.</param>
-        public DscConfiguration(IDictionary<string, string> dictionary)
+        public DscConfiguration(IDictionary<string, RuntimeValue> dictionary)
         {
-            var d = dictionary != null ? new Dictionary<string, string>(dictionary, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (d.Count > 0)
-                this.dictionary = d;
+            if (dictionary != null && dictionary.Count > 0)
+                this.dictionary = new Dictionary<string, RuntimeValue>(dictionary, StringComparer.OrdinalIgnoreCase);
         }
 
-        /// <summary>
-        /// Gets the unique configuration key.
-        /// </summary>
         public override string ConfigurationKey => this.ExtractConfigurationKey();
-        /// <summary>
-        /// Gets the configuration type.
-        /// </summary>
         public override string ConfigurationTypeName => "DSC-" + this.ResourceName;
+        public override bool HasEncryptedProperties => false;
 
-        /// <summary>
-        /// Gets or sets the overridden configuration key name.
-        /// </summary>
         [Persistent]
+        [DefaultValue("Name")]
+        [ScriptAlias("ConfigurationKey")]
+        [DisplayName("Otter configuration key")]
+        [Description("The name of the DSC property which will be used as the Otter configuration key for the server. If this is not specified, the \"Name\" property is used.")]
         public string ConfigurationKeyName { get; set; }
-        /// <summary>
-        /// Gets or sets the DSC resource type.
-        /// </summary>
+        [Required]
         [Persistent]
+        [ScriptAlias("Name")]
+        [DisplayName("Resource")]
+        [PlaceholderText("ex: File")]
         public string ResourceName { get; set; }
-        /// <summary>
-        /// Gets or sets a value indicating whether DSC reported no drift.
-        /// </summary>
+        [Persistent]
+        [ScriptAlias("Module")]
+        [DisplayName("Module")]
+        [DefaultValue("PSDesiredStateConfiguration")]
+        public string ModuleName { get; set; }
+
+        [ScriptAlias("Properties")]
+        [ScriptAlias("Property")]
+        [DisplayName("Properties")]
+        [FieldEditMode(FieldEditMode.Multiline)]
+        [Description(@"DSC property hashtable as an OtterScript map. Example: %(DestinationPath: C:\hdars\1000.txt, Contents: test file ensured)")]
+        [PlaceholderText("%(...)")]
+        public IDictionary<string, RuntimeValue> Properties
+        {
+            get => new Dictionary<string, RuntimeValue>(this.dictionary ?? new Dictionary<string, RuntimeValue>(), StringComparer.OrdinalIgnoreCase);
+            set
+            {
+                if (value == null || value.Count == 0)
+                    this.dictionary = null;
+                else
+                    this.dictionary = new Dictionary<string, RuntimeValue>(value, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
         [Persistent]
         public bool InDesiredState { get; set; }
-
-        /// <summary>
-        /// Gets or sets the items.
-        /// </summary>
         [Persistent]
-        public IEnumerable<DictionaryConfigurationEntry> Items
+        public IEnumerable<DscEntry> Entries
         {
             get
             {
-                if (this.dictionary == null)
-                    return Enumerable.Empty<DictionaryConfigurationEntry>();
+                if (this.dictionary == null || this.dictionary.Count == 0)
+                    return null;
 
-                return this.dictionary.Select(e => new DictionaryConfigurationEntry { Key = e.Key, Value = e.Value });
+                return this.dictionary.Select(e => CreateEntry(e.Key, e.Value));
             }
+            set
+            {
+                var d = new Dictionary<string, RuntimeValue>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var item in value ?? Enumerable.Empty<DscEntry>())
+                {
+                    if (string.IsNullOrEmpty(item.Key))
+                        continue;
+
+                    d[item.Key] = item.ToRuntimeValue();
+                }
+
+                this.dictionary = d.Count > 0 ? d : null;
+            }
+        }
+        [Persistent]
+        [EditorBrowsable(EditorBrowsableState.Never)]
+        [Obsolete("This is only included for compatibility with serialized instances that used it.", true)]
+        public IEnumerable<DictionaryConfigurationEntry> Items
+        {
+            get => null;
             set
             {
                 if (value == null)
@@ -87,21 +110,70 @@ namespace Inedo.Extensions.Windows.Configurations.DSC
                     return;
                 }
 
-                this.dictionary = (from e in value
-                                   group e by e.Key into g
-                                   select g.First()).ToDictionary(e => e.Key, e => e.Value);
+                this.Entries = value.Select(e => new DscEntry { Key = e.Key, Text = e.Value });
             }
         }
 
-        /// <summary>
-        /// Returns the properties.
-        /// </summary>
-        /// <returns>The properties.</returns>
-        public override IReadOnlyDictionary<string, string> GetPropertiesForDisplay(bool hideEncrypted) => this.dictionary ?? new Dictionary<string, string>();
-        /// <summary>
-        /// Gets a value indicating whether this instance has encrypted properties.
-        /// </summary>
-        public override bool HasEncryptedProperties => false;
+        public static ExtendedRichDescription GetDescription(IOperationConfiguration config)
+        {
+            string module = config[nameof(ModuleName)];
+            string name = config[nameof(ResourceName)];
+            if (!string.IsNullOrEmpty(module) && !string.Equals(module, "PSDesiredStateConfiguration", StringComparison.OrdinalIgnoreCase))
+                name = module + "::" + name;
+
+            var keyName = AH.CoalesceString((string)config[nameof(ConfigurationKeyName)], "Name");
+
+            string properties = (string)config[nameof(Properties)] ?? string.Empty;
+            if (properties.StartsWith("%("))
+            {
+                try
+                {
+                    var ps = ProcessedString.Parse(properties);
+                    if (ps.Value is MapTextValue m && m.Map.TryGetValue(keyName, out var mapValue))
+                    {
+                        return new ExtendedRichDescription(
+                            new RichDescription(
+                                "Ensure DSC ",
+                                new Hilite(name),
+                                " Resource"
+                            ),
+                            new RichDescription(
+                                "with " + keyName + " = ",
+                                new Hilite(mapValue.ToString())
+                            )
+                        );
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return new ExtendedRichDescription(
+                new RichDescription(
+                    "Ensure DSC ",
+                    new Hilite(name),
+                    " Resource"
+                ),
+                new RichDescription(
+                    "with properties = ",
+                    new Hilite(properties)
+                )
+            );
+        }
+
+        public override IReadOnlyDictionary<string, string> GetPropertiesForDisplay(bool hideEncrypted)
+        {
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (this.dictionary != null)
+            {
+                foreach (var p in this.dictionary)
+                    d[p.Key] = p.Value.ToString();
+            }
+
+            return d;
+        }
 
         public override ComparisonResult Compare(PersistedConfiguration other)
         {
@@ -110,76 +182,66 @@ namespace Inedo.Extensions.Windows.Configurations.DSC
             return inDesiredState ? ComparisonResult.Identical : new ComparisonResult(new[] { new Difference(nameof(InDesiredState), true, false) });
         }
 
-        internal Dictionary<string, object> GetHashTable()
+        internal Dictionary<string, RuntimeValue> ToPowerShellDictionary(Dictionary<string, RuntimeValueType> propertyTypes = null)
         {
             if (this.dictionary == null)
-                return new Dictionary<string, object>();
+                return new Dictionary<string, RuntimeValue>(StringComparer.OrdinalIgnoreCase);
 
-            var hashTable = new Dictionary<string, object>(this.dictionary.Count, StringComparer.OrdinalIgnoreCase);
-            foreach (var item in this.dictionary)
+            var d = new Dictionary<string, RuntimeValue>(this.dictionary, StringComparer.OrdinalIgnoreCase);
+
+            if (propertyTypes != null)
             {
-                if (string.Equals(item.Key, ConfigurationKeyPropertyName, StringComparison.OrdinalIgnoreCase))
-                    continue;
+                var propertiesToExpand = new List<string>();
 
-                hashTable[item.Key] = GetValueLiteral(item.Value);
+                foreach (var v in d)
+                {
+                    if (v.Value.ValueType == RuntimeValueType.Scalar && propertyTypes.GetValueOrDefault(v.Key) == RuntimeValueType.Vector)
+                        propertiesToExpand.Add(v.Key);
+                }
+
+                foreach (var p in propertiesToExpand)
+                    d[p] = new RuntimeValue(new[] { d[p] });
             }
 
-            return hashTable;
+            return d;
         }
 
         private string ExtractConfigurationKey()
         {
-            var keyName = this.ConfigurationKeyName ?? "Name";
+            var keyName = AH.CoalesceString(this.ConfigurationKeyName, "Name");
 
-            if (this.dictionary.TryGetValue(keyName, out var value) && !string.IsNullOrWhiteSpace(value))
-                return value;
+            if (this.dictionary.TryGetValue(keyName, out var value) && !string.IsNullOrWhiteSpace(value.AsString()))
+                return value.AsString();
 
-            throw new InvalidOperationException("The Name property of the DSC resource was not found and the operation is missing "
-                + $"a \"{ConfigurationKeyPropertyName}\" property whose value is the name of the DSC resource property (or properties) to "
-                + "uniquely identify this configuration."
-            );
+            throw new InvalidOperationException($"The \"{keyName}\" property of the DSC resource was not found. Use the \"ConfigurationKey\" argument for Ensure-DscResource or the \"{Operations.PowerShell.PSDscOperation.ConfigurationKeyPropertyName}\" argument for PSDsc to specify the property which uniquely identifies this resource on the server.");
         }
 
-        private static object GetValueLiteral(string value)
+        private static DscEntry CreateEntry(string key, RuntimeValue value)
         {
-            if (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "$true", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "$false", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (decimal.TryParse(value, out var maybeDecimal))
-                return maybeDecimal;
-
-            if (value.StartsWith("@"))
+            switch (value.ValueType)
             {
-                var ast = Parser.ParseInput(value, out var tokens, out var errors);
-                if (errors.Length == 0)
-                {
-                    try
+                default:
+                case RuntimeValueType.Scalar:
+                    return new DscEntry
                     {
-                        var scriptBlock = ast.GetScriptBlock();
-                        scriptBlock.CheckRestrictedLanguage(new string[0], new string[0], false);
-                        using (var runspace = RunspaceFactory.CreateRunspace(new InedoPSHost()))
-                        {
-                            runspace.Open();
-                            using (var powershell = System.Management.Automation.PowerShell.Create())
-                            {
-                                powershell.Runspace = runspace;
-                                powershell.AddScript("$x = " + value);
-                                powershell.Invoke();
-                                return powershell.Runspace.SessionStateProxy.GetVariable("x");
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Process as a string
-                    }
-                }
-            }
+                        Key = key,
+                        Text = value.AsString() ?? string.Empty
+                    };
 
-            return PowerShellScriptRunner.ConvertToPSValue(new RuntimeValue(value));
+                case RuntimeValueType.Vector:
+                    return new DscEntry
+                    {
+                        Key = key,
+                        List = value.AsEnumerable().Select(e => CreateEntry(null, e)).ToList()
+                    };
+
+                case RuntimeValueType.Map:
+                    return new DscEntry
+                    {
+                        Key = key,
+                        Map = value.AsDictionary().Select(e => CreateEntry(e.Key, e.Value)).ToList()
+                    };
+            }
         }
     }
 }

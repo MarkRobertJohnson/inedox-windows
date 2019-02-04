@@ -9,7 +9,10 @@ namespace Inedo.Extensions.Windows.Configurations.Registry
     [DisplayName("Registry Key")]
     public sealed class RegistryKeyConfiguration : RegistryConfiguration
     {
-        public override bool Exists { get; set; }
+        [Persistent]
+        [DefaultValue(true)]
+        [ScriptAlias("Exists")]
+        public override bool Exists { get; set; } = true;
 
         [Persistent]
         [Category("Advanced")]
@@ -17,5 +20,7 @@ namespace Inedo.Extensions.Windows.Configurations.Registry
         [DisplayName("Default value")]
         [Description("A key's default value is the legacy unnamed value that every registry key may have. This is rarely used.")]
         public string DefaultValue { get; set; }
+
+        public override string ConfigurationKey => this.GetDisplayPath();
     }
 }
