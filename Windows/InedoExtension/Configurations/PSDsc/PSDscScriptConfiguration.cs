@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 namespace Inedo.Extensions.Windows.Configurations.PSDsc
 {
     [Serializable]
-    [DisplayName("PSDsc Script Configuration")]
+    [DisplayName("DSC Composite Resource")]
     public class PSDscScriptConfiguration : PersistedConfiguration
     {
         [Persistent]
@@ -71,6 +71,11 @@ namespace Inedo.Extensions.Windows.Configurations.PSDsc
         [DefaultValue(false)]
         [Description("Enables verbose log output (NOTE: this adds a lot of logging messages)")]
         public bool VerboseLogging { get; set; } = false;
+
+        /// <summary>
+        /// Gets the unique configuration key.
+        /// </summary>
+        public override string ConfigurationKey => DscScriptAsset ?? DscScriptPath ?? base.ConfigurationKey;
     }
 
 
