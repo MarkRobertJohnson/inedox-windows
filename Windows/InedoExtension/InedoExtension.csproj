@@ -161,10 +161,9 @@
   <PropertyGroup>
     <PostBuildEvent>
       powershell -Command "if (Test-Path C:\Projects\Hedgehog\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Force; Move-Item C:\Projects\Hedgehog\Extensions\$(TargetName).zip -Destination C:\Projects\Hedgehog\Extensions\$(TargetName).inedox -Force }"
-      powershell -Command "Stop-Service -Name INEDOOTTERWEBSVC; Stop-Service -Name INEDOOTTERSVC"
+  powershell -Command "Get-Service ('INEDOOTTERWEBSVC', 'INEDOOTTERSVC') -ErrorAction SilentlyContinue | Stop-Service; exit 0" 
       powershell -Command "if (Test-Path C:\ProgramData\Otter\Extensions -PathType Container) { Compress-Archive -Path '$(TargetDir)*' -DestinationPath C:\ProgramData\Otter\Extensions\$(TargetName).zip -Force; Move-Item C:\ProgramData\Otter\Extensions\$(TargetName).zip -Destination C:\ProgramData\Otter\Extensions\$(TargetName).inedox -Force }"
-      powershell -Command Start-Service -Name INEDOOTTERWEBSVC; Start-Service -Name INEDOOTTERSVC"
-    </PostBuildEvent>
+powershell -Command "Get-Service ('INEDOOTTERWEBSVC', 'INEDOOTTERSVC') -ErrorAction SilentlyContinue | Start-Service; exit 0"</PostBuildEvent>
   </PropertyGroup>
   <PropertyGroup>
     <PreBuildEvent>

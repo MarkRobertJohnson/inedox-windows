@@ -77,7 +77,7 @@ namespace Inedo.Extensions.Windows.Operations
                 {
                     DebugLogging = Template.DebugLogging,
                     VerboseLogging = Template.VerboseLogging,
-                    Variables = new Dictionary<string, object>
+                    Variables = new Dictionary<string, RuntimeValue>
                 {
                     { "configDir", configDir },
                 },
@@ -205,7 +205,7 @@ Start-DscConfiguration -Path $configDir -Wait -Verbose -Force
                 OutVariables = new[] { "results" },
                 DebugLogging = Template.DebugLogging,
                 VerboseLogging = Template.VerboseLogging,
-                Variables = new Dictionary<string, object>
+                Variables = new Dictionary<string, RuntimeValue>
                 {
                     {"scriptPath", scriptPath },
                     {"scriptContents", scriptContents }
@@ -251,9 +251,9 @@ $configNames = $configDefs | ForEach-Object {
             collectJob.ProgressUpdate += (s, e) => Interlocked.Exchange(ref this.currentProgress, e);
 
             var result = (ExecutePowerShellJob.Result)await jobRunner.ExecuteJobAsync(collectJob, cancellationToken);
-            var collectValues = ((List<Object>)result.OutVariables["results"]).Cast<string>();
+            var collectValues = (result.OutVariables["results"]);
 
-            return collectValues.ToList();
+            return collectValues.AsEnumerable().Select(x => x.AsString()).ToList();
         }
 
 
@@ -262,7 +262,6 @@ $configNames = $configDefs | ForEach-Object {
             var collectJob = new ExecutePowerShellJob
             {
                 CollectOutput = true,
-                OutVariables = new[] { ExecutePowerShellJob.CollectOutputAsDictionary },
                 DebugLogging = Template.DebugLogging,
                 VerboseLogging = Template.VerboseLogging,
                 Variables = null,
@@ -295,10 +294,10 @@ if($trustedHosts -and $trustedHosts.Value -ne '*') {
                 OutVariables = null,
                 DebugLogging = Template.DebugLogging,
                 VerboseLogging = Template.VerboseLogging,
-                Variables = new Dictionary<string, object>
+                Variables = new Dictionary<string, RuntimeValue>
                 {
                     {"scriptPath", scriptPath },
-                    {"configNames", configNames },
+                    {"configNames", new RuntimeValue(configNames.Select(x => new RuntimeValue(x))) },
                     {"ConfigurationData", configDataPath },
                     {"ConfigurationDataContents", configDataContents }
                 },
@@ -357,10 +356,10 @@ $configNames | foreach {
                 OutVariables = new[] { "results" },
                 DebugLogging = Template.DebugLogging,
                 VerboseLogging = Template.VerboseLogging,
-                Variables = new Dictionary<string, object>
+                Variables = new Dictionary<string, RuntimeValue>
                 {
                     {"scriptPath", scriptPath },
-                    {"configNames", configNames }
+                    {"configNames", new RuntimeValue(configNames.Select(x => new RuntimeValue(x))) }
                 },
                 LogOutput = true,
                 ScriptText = @"
@@ -381,12 +380,12 @@ $configNames | foreach {
             collectJob.ProgressUpdate += (s, e) => Interlocked.Exchange(ref this.currentProgress, e);
 
             var result = (ExecutePowerShellJob.Result)await jobRunner.ExecuteJobAsync(collectJob, context.CancellationToken);
-            var collectValues = ((Dictionary<string, object>)result.OutVariables["results"]);
+            var collectValues = result.OutVariables["results"].AsDictionary();
 
             var isConfigured = true;
             foreach (var item in collectValues)
             {
-                if(!bool.Parse(item.Value?.ToString()))
+                if(!bool.Parse(item.Value.AsString()))
                 {
                     this.LogInformation($"DSC configuration '{item.Key}' was not configured");
                     isConfigured = false;
